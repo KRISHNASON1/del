@@ -1,4 +1,4 @@
-// src/index.js - Fixed Main Server File
+// src/index.js - Fixed Main Server File with Proper Route Mounting
 const express = require('express');
 const path = require('path');
 
@@ -47,7 +47,7 @@ const studentController = require('./controllers/studentController');
 const classController = require('./controllers/classController');
 const quizController = require('./controllers/quizController');
 
-// ==================== MOUNT ROUTES ====================
+// ==================== MOUNT ROUTES - FIXED ====================
 
 // Auth routes
 app.use('/', authRoutes);
@@ -56,12 +56,65 @@ app.use('/', authRoutes);
 app.use('/', teacherRoutes);
 app.use('/', studentRoutes);
 
-// API routes
+// API routes - FIXED MOUNTING
 app.use('/api/auth', authApi);
 app.use('/api/teacher', teacherApi);
 app.use('/api/student', studentApi);
 app.use('/api/quiz', quizApi);
-app.use('/api/class', classApi);
+
+// FIXED: Mount class API at /api/classes for direct access
+app.use('/api/classes', classApi);
+
+// ==================== UNIFIED CLASS MANAGEMENT ROUTES ====================
+
+// Additional unified class routes that work for both teacher and student based on user type
+const { requireAuth } = require('./middleware/authMiddleware');
+
+// Get classes based on user type
+app.get('/api/classes', requireAuth, async (req, res) => {
+    try {
+        if (req.session.userType === 'teacher') {
+            // Redirect to teacher classes
+            return res.redirect('/api/teacher/classes');
+        } else if (req.session.userType === 'student') {
+            // Redirect to student enrolled classes
+            return res.redirect('/api/student/enrolled-classes');
+        } else {
+            return res.status(403).json({
+                success: false,
+                message: 'Invalid user type'
+            });
+        }
+    } catch (error) {
+        console.error('Error in unified classes route:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to get classes: ' + error.message
+        });
+    }
+});
+
+// Create class (teacher only)
+app.post('/api/classes', requireAuth, async (req, res) => {
+    try {
+        if (req.session.userType !== 'teacher') {
+            return res.status(403).json({
+                success: false,
+                message: 'Access denied. Only teachers can create classes.'
+            });
+        }
+        
+        // Forward to teacher API
+        req.url = '/classes';
+        return teacherApi(req, res);
+    } catch (error) {
+        console.error('Error in unified class creation route:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to create class: ' + error.message
+        });
+    }
+});
 
 // ==================== CONTROLLER-BASED ROUTES ====================
 
@@ -109,8 +162,14 @@ app.get('/health', (req, res) => {
         uptime: process.uptime(),
         memory: process.memoryUsage(),
         timestamp: new Date().toISOString(),
-        routes: 'All routes properly mounted',
-        database: 'Connected'
+        routes: 'All routes properly mounted and fixed',
+        database: 'Connected',
+        fixes: [
+            'Fixed /api/classes route mounting',
+            'Added unified class management',
+            'Proper route forwarding based on user type',
+            'All APIs now accessible at correct endpoints'
+        ]
     });
 });
 
@@ -118,15 +177,18 @@ app.get('/health', (req, res) => {
 app.get('/test', (req, res) => {
     res.json({
         success: true,
-        message: 'QuizAI server is running with fixed auth!',
+        message: 'QuizAI server is running with FIXED routes!',
         timestamp: new Date().toISOString(),
         environment: process.env.NODE_ENV || 'development',
-        fixes_applied: [
-            'Name parsing for signup',
-            'Fixed schema validation',
-            'Resolved duplicate indexes',
-            'Proper firstName/lastName handling'
-        ]
+        routes_status: 'All routes fixed and properly mounted',
+        available_apis: {
+            auth: '/api/auth/*',
+            teacher: '/api/teacher/*',
+            student: '/api/student/*',
+            quiz: '/api/quiz/*',
+            classes: '/api/classes/* (FIXED)',
+            unified_classes: '/api/classes (works for both teacher and student)'
+        }
     });
 });
 
@@ -142,7 +204,8 @@ app.use((req, res) => {
         success: false,
         message: 'Route not found',
         path: req.originalUrl,
-        method: req.method
+        method: req.method,
+        suggestion: 'Check the API documentation for correct endpoints'
     });
 });
 
@@ -180,12 +243,15 @@ const startServer = async () => {
             console.log(`🌐 Open http://localhost:${PORT} in your browser`);
             console.log(`📚 Ready to process lecture uploads and generate enhanced quizzes!`);
             console.log(`🔑 Using Gemini model: gemini-1.5-flash (Free tier)`);
-            console.log(`🔧 Applied fixes:`);
-            console.log(`   ✅ Fixed auth signup validation issues`);
-            console.log(`   ✅ Resolved duplicate MongoDB indexes`);
-            console.log(`   ✅ Added proper name parsing (firstName/lastName)`);
-            console.log(`   ✅ Improved error handling and logging`);
-            console.log('✅ Server initialization complete!');
+            console.log(`🔧 FIXED ISSUES:`);
+            console.log(`   ✅ Fixed /api/classes route mounting issue`);
+            console.log(`   ✅ Added unified class management API`);
+            console.log(`   ✅ Proper route forwarding based on user type`);
+            console.log(`   ✅ All class APIs now accessible at correct endpoints`);
+            console.log(`   ✅ Teacher class management: /api/teacher/classes`);
+            console.log(`   ✅ Unified class access: /api/classes`);
+            console.log(`   ✅ Student class access: /api/student/enrolled-classes`);
+            console.log('✅ Server initialization complete with all routes fixed!');
         });
 
     } catch (error) {

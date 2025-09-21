@@ -1,4 +1,4 @@
-// routes/api/classApi.js
+// routes/api/classApi.js - FIXED VERSION
 const express = require('express');
 const router = express.Router();
 const { requireAuth, requireRole } = require('../../middleware/authMiddleware');
@@ -22,10 +22,280 @@ const { formatPercentage, calculateTimeEfficiency, calculateRankingPoints, calcu
 const requireTeacher = requireRole('teacher');
 const requireStudent = requireRole('student');
 
+// ==================== UNIFIED CLASS MANAGEMENT APIs ====================
+
+// Get classes based on user type
+router.get('/', requireAuth, async (req, res) => {
+    try {
+        const userType = req.session.userType;
+        const userId = req.session.userId;
+
+        console.log('Unified classes API accessed:', {
+            userType: userType,
+            userId: userId,
+            userName: req.session.userName
+        });
+
+        if (userType === 'teacher') {
+            // Get teacher's classes
+            const classes = await classCollection.find({
+                teacherId: userId,
+                isActive: true
+            }).sort({ createdAt: -1 }).lean();
+
+            console.log(`Found ${classes.length} classes for teacher ${req.session.userName}`);
+
+            const formattedClasses = classes.map(classDoc => ({
+                id: classDoc._id,
+                name: classDoc.name,
+                subject: classDoc.subject,
+                description: classDoc.description,
+                studentCount: classDoc.studentCount || 0,
+                lectureCount: classDoc.lectureCount || 0,
+                quizCount: classDoc.quizCount || 0,
+                averageScore: classDoc.averageScore || 0,
+                createdAt: classDoc.createdAt,
+                updatedAt: classDoc.updatedAt
+            }));
+
+            res.json({
+                success: true,
+                classes: formattedClasses,
+                totalClasses: formattedClasses.length,
+                userType: 'teacher'
+            });
+
+        } else if (userType === 'student') {
+            // Get student's enrolled classes
+            const enrollments = await classStudentCollection.find({
+                studentId: userId,
+                isActive: true
+            }).lean();
+
+            if (enrollments.length === 0) {
+                return res.json({
+                    success: true,
+                    classes: [],
+                    totalClasses: 0,
+                    userType: 'student',
+                    message: 'No enrolled classes found.'
+                });
+            }
+
+            const classIds = enrollments.map(e => e.classId);
+            const classes = await classCollection.find({
+                _id: { $in: classIds },
+                isActive: true
+            }).lean();
+
+            // Get student's performance in each class
+            const enrolledClasses = await Promise.all(
+                classes.map(async (cls) => {
+                    const enrollment = enrollments.find(e => 
+                        e.classId.toString() === cls._id.toString()
+                    );
+
+                    const studentResults = await quizResultCollection.find({
+                        studentId: userId,
+                        classId: cls._id
+                    }).lean();
+
+                    const availableQuizzes = await quizCollection.countDocuments({
+                        classId: cls._id,
+                        isActive: true
+                    });
+
+                    const quizzesTaken = studentResults.length;
+                    const averageScore = quizzesTaken > 0
+                        ? (studentResults.reduce((sum, result) => sum + result.percentage, 0) / quizzesTaken)
+                        : 0;
+
+                    return {
+                        id: cls._id,
+                        name: cls.name,
+                        subject: cls.subject,
+                        description: cls.description,
+                        enrolledAt: enrollment.enrolledAt,
+                        quizzesTaken: quizzesTaken,
+                        averageScore: parseFloat(averageScore.toFixed(1)),
+                        availableQuizzes: availableQuizzes,
+                        completionRate: availableQuizzes > 0 ? 
+                            parseFloat(((quizzesTaken / availableQuizzes) * 100).toFixed(1)) : 0
+                    };
+                })
+            );
+
+            console.log(`Found ${enrolledClasses.length} enrolled classes for student ${req.session.userName}`);
+
+            res.json({
+                success: true,
+                classes: enrolledClasses,
+                totalClasses: enrolledClasses.length,
+                userType: 'student'
+            });
+
+        } else {
+            return res.status(403).json({
+                success: false,
+                message: 'Invalid user type'
+            });
+        }
+
+    } catch (error) {
+        console.error('Error in unified classes API:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch classes: ' + error.message
+        });
+    }
+});
+
+// Create new class (teacher only)
+router.post('/', requireTeacher, async (req, res) => {
+    try {
+        const { name, subject, description } = req.body;
+        const teacherId = req.session.userId;
+        const teacherName = req.session.userName;
+
+        console.log('Creating new class:', {
+            name: name,
+            subject: subject,
+            teacherId: teacherId,
+            teacherName: teacherName
+        });
+
+        if (!name || !subject) {
+            return res.status(400).json({
+                success: false,
+                message: 'Class name and subject are required.'
+            });
+        }
+
+        // Check if class name already exists for this teacher
+        const existingClass = await classCollection.findOne({
+            teacherId: teacherId,
+            name: name.trim(),
+            isActive: true
+        });
+
+        if (existingClass) {
+            return res.status(400).json({
+                success: false,
+                message: 'You already have a class with this name.'
+            });
+        }
+
+        // Create new class
+        const newClass = await classCollection.create({
+            name: name.trim(),
+            subject: subject.trim(),
+            description: description?.trim() || '',
+            teacherId: teacherId,
+            teacherName: teacherName,
+            studentCount: 0,
+            lectureCount: 0,
+            quizCount: 0,
+            averageScore: 0
+        });
+
+        console.log(`✅ New class created: ${newClass.name} by ${teacherName}`);
+
+        res.json({
+            success: true,
+            message: 'Class created successfully!',
+            class: {
+                id: newClass._id,
+                name: newClass.name,
+                subject: newClass.subject,
+                description: newClass.description,
+                studentCount: 0,
+                lectureCount: 0,
+                quizCount: 0,
+                averageScore: 0,
+                createdAt: newClass.createdAt
+            }
+        });
+
+    } catch (error) {
+        console.error('Error creating class:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to create class: ' + error.message
+        });
+    }
+});
+
+// Get specific class details
+router.get('/:classId', requireAuth, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const userId = req.session.userId;
+        const userType = req.session.userType;
+
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            isActive: true
+        }).lean();
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found.'
+            });
+        }
+
+        // Check access permissions
+        if (userType === 'teacher') {
+            if (classDoc.teacherId.toString() !== userId.toString()) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Access denied. You do not own this class.'
+                });
+            }
+        } else if (userType === 'student') {
+            const enrollment = await classStudentCollection.findOne({
+                studentId: userId,
+                classId: classId,
+                isActive: true
+            });
+
+            if (!enrollment) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Access denied. You are not enrolled in this class.'
+                });
+            }
+        }
+
+        res.json({
+            success: true,
+            class: {
+                id: classDoc._id,
+                name: classDoc.name,
+                subject: classDoc.subject,
+                description: classDoc.description,
+                studentCount: classDoc.studentCount || 0,
+                lectureCount: classDoc.lectureCount || 0,
+                quizCount: classDoc.quizCount || 0,
+                averageScore: classDoc.averageScore || 0,
+                createdAt: classDoc.createdAt,
+                updatedAt: classDoc.updatedAt
+            }
+        });
+
+    } catch (error) {
+        console.error('Error fetching class:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch class: ' + error.message
+        });
+    }
+});
+
 // ==================== JOIN CODE MANAGEMENT APIs ====================
 
 // Generate join code for class (teacher only)
-router.post('/classes/:classId/generate-join-code', requireTeacher, async (req, res) => {
+router.post('/:classId/generate-join-code', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
         const teacherId = req.session.userId;
@@ -81,7 +351,7 @@ router.post('/classes/:classId/generate-join-code', requireTeacher, async (req, 
             maxUsage: 50
         });
 
-        console.log('Join code generated:', {
+        console.log('✅ Join code generated:', {
             joinCode: joinCode,
             expiresAt: expiresAt,
             className: classDoc.name
@@ -109,7 +379,7 @@ router.post('/classes/:classId/generate-join-code', requireTeacher, async (req, 
 });
 
 // Get active join code for class (teacher only)
-router.get('/classes/:classId/active-join-code', requireTeacher, async (req, res) => {
+router.get('/:classId/active-join-code', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
         const teacherId = req.session.userId;
@@ -163,7 +433,7 @@ router.get('/classes/:classId/active-join-code', requireTeacher, async (req, res
 });
 
 // Validate join code (student)
-router.get('/classes/validate-join-code/:code', requireStudent, async (req, res) => {
+router.get('/validate-join-code/:code', requireStudent, async (req, res) => {
     try {
         const joinCode = req.params.code.toUpperCase();
         const studentId = req.session.userId;
@@ -232,7 +502,7 @@ router.get('/classes/validate-join-code/:code', requireStudent, async (req, res)
             });
         }
 
-        console.log('Join code validated successfully:', {
+        console.log('✅ Join code validated successfully:', {
             className: codeDoc.className,
             teacherName: codeDoc.teacherName
         });
@@ -262,7 +532,7 @@ router.get('/classes/validate-join-code/:code', requireStudent, async (req, res)
 // ==================== JOIN REQUEST MANAGEMENT APIs ====================
 
 // Submit join request (student)
-router.post('/classes/join-request', requireStudent, async (req, res) => {
+router.post('/join-request', requireStudent, async (req, res) => {
     try {
         const { joinCode } = req.body;
         const studentId = req.session.userId;
@@ -303,7 +573,7 @@ router.post('/classes/join-request', requireStudent, async (req, res) => {
             });
         }
 
-        // Check for ANY existing classStudentCollection entry (active or inactive)
+        // Check for existing enrollment and handle reactivation
         const existingClassStudentEntry = await classStudentCollection.findOne({
             classId: codeDoc.classId,
             studentId: studentId
@@ -311,14 +581,12 @@ router.post('/classes/join-request', requireStudent, async (req, res) => {
 
         if (existingClassStudentEntry) {
             if (existingClassStudentEntry.isActive) {
-                console.log('Student already actively enrolled in this class.');
                 return res.status(400).json({
                     success: false,
                     message: 'You are already enrolled in this class.'
                 });
             } else {
                 // Reactivate inactive enrollment
-                console.log('Reactivating inactive enrollment for student:', studentName, 'in class:', codeDoc.className);
                 await classStudentCollection.findByIdAndUpdate(existingClassStudentEntry._id, {
                     isActive: true,
                     enrolledAt: new Date(),
@@ -326,19 +594,14 @@ router.post('/classes/join-request', requireStudent, async (req, res) => {
                     studentEnrollment: student.enrollment
                 });
 
-                // Update any pending/rejected join requests to 'approved'
+                // Update join requests to approved
                 await classJoinRequestCollection.updateMany(
                     { classId: codeDoc.classId, studentId: studentId, status: { $in: ['pending', 'rejected'] } },
-                    {
-                        status: 'approved',
-                        processedAt: new Date()
-                    }
+                    { status: 'approved', processedAt: new Date() }
                 );
 
-                // Increment usage count for the join code
-                await classJoinCodeCollection.findByIdAndUpdate(codeDoc._id, {
-                    $inc: { usageCount: 1 }
-                });
+                // Increment usage count
+                await classJoinCodeCollection.findByIdAndUpdate(codeDoc._id, { $inc: { usageCount: 1 } });
 
                 // Update class student count
                 const totalActiveStudents = await classStudentCollection.countDocuments({
@@ -362,22 +625,20 @@ router.post('/classes/join-request', requireStudent, async (req, res) => {
             }
         }
 
-        // Check if student has ANY existing join request (pending or rejected)
+        // Check for existing join requests
         const existingJoinRequest = await classJoinRequestCollection.findOne({
             classId: codeDoc.classId,
             studentId: studentId
         });
 
         if (existingJoinRequest) {
-            console.log('Existing join request found (status:', existingJoinRequest.status, ')');
             if (existingJoinRequest.status === 'pending') {
                 return res.status(400).json({
                     success: false,
                     message: 'You already have a pending request for this class. Please wait for the teacher\'s approval.'
                 });
             } else if (existingJoinRequest.status === 'rejected') {
-                // If a previous request was rejected, delete it to allow a new one
-                console.log('Deleting previous rejected request to allow new submission.');
+                // Delete previous rejected request to allow new one
                 await classJoinRequestCollection.deleteOne({ _id: existingJoinRequest._id });
             }
         }
@@ -398,11 +659,9 @@ router.post('/classes/join-request', requireStudent, async (req, res) => {
         });
 
         // Increment usage count
-        await classJoinCodeCollection.findByIdAndUpdate(codeDoc._id, {
-            $inc: { usageCount: 1 }
-        });
+        await classJoinCodeCollection.findByIdAndUpdate(codeDoc._id, { $inc: { usageCount: 1 } });
 
-        console.log('New join request created:', {
+        console.log('✅ New join request created:', {
             requestId: joinRequest._id,
             className: codeDoc.className,
             teacherName: codeDoc.teacherName
@@ -421,7 +680,6 @@ router.post('/classes/join-request', requireStudent, async (req, res) => {
 
     } catch (error) {
         console.error('Error submitting join request:', error);
-        // Fallback for unexpected duplicate key errors
         if (error.code === 11000) {
             return res.status(400).json({
                 success: false,
@@ -435,8 +693,10 @@ router.post('/classes/join-request', requireStudent, async (req, res) => {
     }
 });
 
+// ==================== ADDITIONAL CLASS MANAGEMENT ====================
+
 // Get pending requests for class (teacher)
-router.get('/classes/:classId/join-requests', requireTeacher, async (req, res) => {
+router.get('/:classId/join-requests', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
         const teacherId = req.session.userId;
@@ -461,9 +721,6 @@ router.get('/classes/:classId/join-requests', requireTeacher, async (req, res) =
             status: 'pending'
         }).sort({ requestedAt: -1 });
 
-        console.log(`Found ${pendingRequests.length} pending requests for class: ${classDoc.name}`);
-
-        // Format requests for response
         const formattedRequests = pendingRequests.map(request => ({
             requestId: request._id,
             studentName: request.studentName,
@@ -490,19 +747,11 @@ router.get('/classes/:classId/join-requests', requireTeacher, async (req, res) =
 });
 
 // Approve/reject join request (teacher)
-router.post('/classes/:classId/join-requests/:requestId/:action', requireTeacher, async (req, res) => {
+router.post('/:classId/join-requests/:requestId/:action', requireTeacher, async (req, res) => {
     try {
         const { classId, requestId, action } = req.params;
         const teacherId = req.session.userId;
 
-        console.log('Processing join request action:', {
-            classId: classId,
-            requestId: requestId,
-            action: action,
-            teacherId: teacherId
-        });
-
-        // Validate action
         if (!['approve', 'reject'].includes(action)) {
             return res.status(400).json({
                 success: false,
@@ -539,7 +788,7 @@ router.post('/classes/:classId/join-requests/:requestId/:action', requireTeacher
         }
 
         if (action === 'approve') {
-            // Check for ANY existing enrollment (active or inactive)
+            // Handle enrollment logic (reactivate or create new)
             const existingEnrollment = await classStudentCollection.findOne({
                 classId: classId,
                 studentId: joinRequest.studentId
@@ -547,17 +796,12 @@ router.post('/classes/:classId/join-requests/:requestId/:action', requireTeacher
 
             if (existingEnrollment) {
                 if (existingEnrollment.isActive) {
-                    // Student is already actively enrolled
                     await joinRequest.approve(teacherId);
-
                     return res.status(400).json({
                         success: false,
                         message: 'Student is already enrolled in this class.'
                     });
                 } else {
-                    // Reactivate existing inactive enrollment
-                    console.log('Reactivating existing inactive enrollment for student:', joinRequest.studentName);
-
                     await classStudentCollection.findByIdAndUpdate(existingEnrollment._id, {
                         isActive: true,
                         enrolledAt: new Date(),
@@ -566,9 +810,6 @@ router.post('/classes/:classId/join-requests/:requestId/:action', requireTeacher
                     });
                 }
             } else {
-                // No existing enrollment found, create new one
-                console.log('Creating new enrollment for student:', joinRequest.studentName);
-
                 await classStudentCollection.create({
                     classId: classId,
                     studentId: joinRequest.studentId,
@@ -579,7 +820,6 @@ router.post('/classes/:classId/join-requests/:requestId/:action', requireTeacher
                 });
             }
 
-            // Approve the request
             await joinRequest.approve(teacherId);
 
             // Update class student count
@@ -593,12 +833,6 @@ router.post('/classes/:classId/join-requests/:requestId/:action', requireTeacher
                 updatedAt: new Date()
             });
 
-            console.log('Join request approved:', {
-                studentName: joinRequest.studentName,
-                className: classDoc.name,
-                enrollmentMethod: existingEnrollment ? 'reactivated' : 'new'
-            });
-
             res.json({
                 success: true,
                 message: `${joinRequest.studentName} has been added to the class successfully!`,
@@ -608,23 +842,14 @@ router.post('/classes/:classId/join-requests/:requestId/:action', requireTeacher
             });
 
         } else if (action === 'reject') {
-            // Reject without asking for reason
-            const defaultRejectionReason = 'Request rejected by teacher';
-
-            // Reject the request
-            await joinRequest.reject(teacherId, defaultRejectionReason);
-
-            console.log('Join request rejected:', {
-                studentName: joinRequest.studentName,
-                reason: defaultRejectionReason
-            });
+            await joinRequest.reject(teacherId, 'Request rejected by teacher');
 
             res.json({
                 success: true,
                 message: `Join request from ${joinRequest.studentName} has been rejected.`,
                 action: 'rejected',
                 studentName: joinRequest.studentName,
-                rejectionReason: defaultRejectionReason
+                rejectionReason: 'Request rejected by teacher'
             });
         }
 
@@ -634,329 +859,6 @@ router.post('/classes/:classId/join-requests/:requestId/:action', requireTeacher
             success: false,
             message: 'Failed to process join request: ' + error.message
         });
-    }
-});
-
-// Get student's join request status
-router.get('/student/join-request-status/:classId', requireStudent, async (req, res) => {
-    try {
-        const classId = req.params.classId;
-        const studentId = req.session.userId;
-
-        // Find the most recent request for this class
-        const joinRequest = await classJoinRequestCollection.findOne({
-            classId: classId,
-            studentId: studentId
-        }).sort({ requestedAt: -1 });
-
-        if (!joinRequest) {
-            return res.json({
-                success: true,
-                hasRequest: false,
-                status: null
-            });
-        }
-
-        res.json({
-            success: true,
-            hasRequest: true,
-            status: joinRequest.status,
-            requestedAt: joinRequest.requestedAt,
-            processedAt: joinRequest.processedAt,
-            rejectionReason: joinRequest.rejectionReason,
-            className: joinRequest.className,
-            teacherName: joinRequest.teacherName
-        });
-
-    } catch (error) {
-        console.error('Error fetching join request status:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch request status: ' + error.message
-        });
-    }
-});
-
-// ==================== CLASS RANKINGS APIs ====================
-
-// Get class rankings with participation weighting (teacher)
-router.get('/classes/:classId/rankings', requireTeacher, async (req, res) => {
-    try {
-        const classId = req.params.classId;
-        const teacherId = req.session.userId;
-
-        // Verify class ownership
-        const classDoc = await classCollection.findOne({
-            _id: classId,
-            teacherId: teacherId,
-            isActive: true
-        });
-
-        if (!classDoc) {
-            return res.status(404).json({
-                success: false,
-                message: 'Class not found or access denied.'
-            });
-        }
-
-        // Get all students enrolled in this class
-        const classStudents = await classStudentCollection.find({
-            classId: classId,
-            isActive: true
-        }).lean();
-
-        if (classStudents.length === 0) {
-            return res.json({
-                success: true,
-                data: {
-                    rankings: [],
-                    totalStudents: 0,
-                    rankingSystem: {
-                        formula: 'Final Points = Base Points × (0.3 + 0.7 × Participation Rate)',
-                        description: 'Rankings reward both performance and participation. Base Points = (Score × 0.7) + (Time Efficiency × 0.3)'
-                    }
-                }
-            });
-        }
-
-        // Get quiz information for participation calculation
-        const classQuizzes = await quizCollection.find({
-            classId: classId,
-            isActive: true
-        }).lean();
-
-        const totalQuizzesAvailable = classQuizzes.length;
-
-        // Calculate rankings with participation-weighted formula
-        const studentRankings = await Promise.all(
-            classStudents.map(async (student) => {
-                const studentResults = await quizResultCollection.find({
-                    studentId: student.studentId,
-                    classId: classId
-                }).lean();
-
-                if (studentResults.length === 0) {
-                    return {
-                        studentId: student.studentId,
-                        studentName: student.studentName,
-                        totalQuizzes: 0,
-                        averageScore: 0,
-                        averageTimeEfficiency: 0,
-                        participationRate: 0,
-                        basePoints: 0,
-                        finalPoints: 0,
-                        averageTime: '0:00',
-                        rank: 999
-                    };
-                }
-
-                // Calculate average score
-                const averageScore = studentResults.reduce((sum, r) => sum + r.percentage, 0) / studentResults.length;
-
-                // Calculate time efficiency for each result
-                const timeEfficiencies = studentResults.map(result => {
-                    const quiz = classQuizzes.find(q => q._id.toString() === result.quizId.toString());
-                    const quizDurationSeconds = quiz ? (quiz.durationMinutes || 15) * 60 : 900;
-                    return calculateTimeEfficiency(result.timeTakenSeconds, quizDurationSeconds);
-                });
-
-                const averageTimeEfficiency = timeEfficiencies.length > 0
-                    ? timeEfficiencies.reduce((sum, eff) => sum + eff, 0) / timeEfficiencies.length
-                    : 0;
-
-                // Calculate participation rate
-                const participationRate = totalQuizzesAvailable > 0
-                    ? (studentResults.length / totalQuizzesAvailable) * 100
-                    : 0;
-
-                // Calculate base points and participation-weighted final points
-                const basePoints = calculateRankingPoints(averageScore, averageTimeEfficiency);
-                const finalPoints = calculateParticipationWeightedPoints(averageScore, averageTimeEfficiency, participationRate);
-
-                const averageTime = studentResults.reduce((sum, r) => sum + r.timeTakenSeconds, 0) / studentResults.length;
-
-                return {
-                    studentId: student.studentId,
-                    studentName: student.studentName,
-                    totalQuizzes: studentResults.length,
-                    averageScore: formatPercentage(averageScore),
-                    averageTimeEfficiency: formatPercentage(averageTimeEfficiency),
-                    participationRate: formatPercentage(participationRate),
-                    basePoints: basePoints,
-                    finalPoints: finalPoints,
-                    averageTime: formatTime(averageTime),
-                    rank: 0
-                };
-            })
-        );
-
-        // Sort by final points (participation-weighted)
-        const rankedStudents = studentRankings
-            .filter(student => student.totalQuizzes > 0)
-            .sort((a, b) => b.finalPoints - a.finalPoints)
-            .map((student, index) => ({
-                ...student,
-                rank: index + 1
-            }));
-
-        console.log(`Participation-weighted rankings generated: ${rankedStudents.length} students`);
-
-        res.json({
-            success: true,
-            data: {
-                rankings: rankedStudents,
-                totalStudents: rankedStudents.length,
-                totalQuizzesAvailable: totalQuizzesAvailable,
-                rankingSystem: {
-                    formula: 'Final Points = Base Points × (0.3 + 0.7 × Participation Rate)',
-                    baseFormula: 'Base Points = (Score × 0.7) + (Time Efficiency × 0.3)',
-                    description: 'Rankings reward both performance and participation. Students with higher participation get bonus multiplier.',
-                    participationWeight: '70% of final scoring depends on participation rate'
-                }
-            }
-        });
-
-    } catch (error) {
-        console.error('Error generating participation-weighted rankings:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to generate rankings: ' + error.message
-        });
-    }
-});
-
-// Get last quiz rankings for class (teacher)
-router.get('/classes/:classId/last-quiz-rankings', requireTeacher, async (req, res) => {
-    try {
-        const classId = req.params.classId;
-        const teacherId = req.session.userId;
-
-        // Verify class ownership
-        const classDoc = await classCollection.findOne({
-            _id: classId,
-            teacherId: teacherId,
-            isActive: true
-        });
-
-        if (!classDoc) {
-            return res.status(404).json({
-                success: false,
-                message: 'Class not found or access denied.'
-            });
-        }
-
-        // Find the most recently taken quiz by students (not created)
-        const latestResult = await quizResultCollection.findOne({
-            classId: classId
-        }).sort({ submissionDate: -1 }).lean();
-
-        if (!latestResult) {
-            return res.json({
-                success: true,
-                data: {
-                    quizTitle: null,
-                    quizDate: null,
-                    rankings: []
-                }
-            });
-        }
-
-        // Get the quiz details
-        const quiz = await quizCollection.findById(latestResult.quizId).lean();
-
-        if (!quiz) {
-            return res.json({
-                success: true,
-                data: {
-                    quizTitle: 'Unknown Quiz',
-                    quizDate: latestResult.submissionDate.toISOString().split('T')[0],
-                    rankings: []
-                }
-            });
-        }
-
-        // Get all student results for that specific quiz
-        const quizResults = await quizResultCollection.find({
-            quizId: latestResult.quizId,
-            classId: classId
-        }).lean();
-
-        // Calculate rankings using the new points formula for that quiz
-        const quizDurationSeconds = (quiz.durationMinutes || 15) * 60;
-
-        const rankings = quizResults.map(result => {
-            // Calculate time efficiency for this specific quiz
-            const timeEfficiency = calculateTimeEfficiency(result.timeTakenSeconds, quizDurationSeconds);
-
-            // Calculate points using new formula
-            const points = calculateRankingPoints(result.percentage, timeEfficiency);
-
-            return {
-                studentId: result.studentId,
-                studentName: result.studentName,
-                score: formatPercentage(result.percentage),
-                timeTaken: formatTime(result.timeTakenSeconds),
-                timeEfficiency: formatPercentage(timeEfficiency),
-                points: points,
-                submissionDate: result.submissionDate
-            };
-        })
-            .sort((a, b) => b.points - a.points) // Sort by points descending
-            .map((student, index) => ({
-                ...student,
-                rank: index + 1
-            }));
-
-        console.log(`Last quiz rankings loaded: ${quiz.lectureTitle} with ${rankings.length} participants`);
-
-        // Return quiz title and rankings
-        res.json({
-            success: true,
-            data: {
-                quizTitle: quiz.lectureTitle,
-                quizDate: latestResult.submissionDate.toISOString().split('T')[0],
-                rankings: rankings
-            }
-        });
-
-    } catch (error) {
-        console.error('Error loading last quiz rankings:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to load last quiz rankings: ' + error.message
-        });
-    }
-});
-
-// ==================== DEBUG ROUTES ====================
-
-// Debug route to check active join codes
-router.get('/debug/join-codes', requireTeacher, async (req, res) => {
-    try {
-        const activeCodes = await classJoinCodeCollection.find({
-            isActive: true,
-            expiresAt: { $gt: new Date() }
-        }).sort({ generatedAt: -1 }).limit(10).lean();
-
-        const formattedCodes = activeCodes.map(code => ({
-            joinCode: code.joinCode,
-            className: code.className,
-            teacherName: code.teacherName,
-            expiresAt: code.expiresAt,
-            usageCount: code.usageCount,
-            maxUsage: code.maxUsage,
-            remainingTime: Math.max(0, Math.floor((code.expiresAt - new Date()) / 1000))
-        }));
-
-        res.json({
-            success: true,
-            activeCodes: formattedCodes,
-            totalActive: activeCodes.length
-        });
-
-    } catch (error) {
-        console.error('Debug error:', error);
-        res.status(500).json({ success: false, error: error.message });
     }
 });
 
