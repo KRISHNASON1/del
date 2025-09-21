@@ -1,4 +1,4 @@
-// routes/api/teacherApi.js - FIXED VERSION
+// routes/api/teacherApi.js - FIXED VERSION WITH MISSING ROUTES
 const express = require('express');
 const router = express.Router();
 const { requireAuth, requireRole } = require('../../middleware/authMiddleware');
@@ -18,12 +18,15 @@ const {
     classJoinRequestCollection
 } = require('../../mongodb');
 
+// Import utility functions
+const { formatPercentage, calculateTimeEfficiency, calculateRankingPoints, calculateParticipationWeightedPoints, formatTime, getTimeAgo } = require('../../utils/helpers');
+
 // Middleware to ensure teacher access
 const requireTeacher = requireRole('teacher');
 
 // ==================== CLASS MANAGEMENT APIs ====================
 
-// Get all classes for a teacher - FIXED
+// Get all classes for a teacher
 router.get('/classes', requireTeacher, async (req, res) => {
     try {
         const teacherId = req.session.userId;
@@ -94,7 +97,7 @@ router.get('/classes', requireTeacher, async (req, res) => {
     }
 });
 
-// Create new class - FIXED
+// Create new class
 router.post('/classes', requireTeacher, validateClass, async (req, res) => {
     try {
         const { name, subject, description } = req.body;
@@ -320,6 +323,230 @@ router.delete('/classes/:classId', requireTeacher, async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to archive class: ' + error.message
+        });
+    }
+});
+
+// ==================== MISSING ROUTES - FIXED ====================
+
+// Get class rankings - FIXED: This was being called as /api/teacher/class/:classId/rankings
+router.get('/class/:classId/rankings', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Get all students enrolled in this class
+        const classStudents = await classStudentCollection.find({
+            classId: classId,
+            isActive: true
+        }).lean();
+
+        if (classStudents.length === 0) {
+            return res.json({
+                success: true,
+                data: {
+                    rankings: [],
+                    totalStudents: 0,
+                    rankingSystem: {
+                        formula: 'Final Points = Base Points × (0.3 + 0.7 × Participation Rate)',
+                        description: 'Rankings reward both performance and participation. Base Points = (Score × 0.7) + (Time Efficiency × 0.3)'
+                    }
+                }
+            });
+        }
+
+        // Get quiz information for participation calculation
+        const classQuizzes = await quizCollection.find({
+            classId: classId,
+            isActive: true
+        }).lean();
+
+        const totalQuizzesAvailable = classQuizzes.length;
+
+        // Calculate rankings with participation-weighted formula
+        const studentRankings = await Promise.all(
+            classStudents.map(async (student) => {
+                const studentResults = await quizResultCollection.find({
+                    studentId: student.studentId,
+                    classId: classId
+                }).lean();
+
+                if (studentResults.length === 0) {
+                    return {
+                        studentId: student.studentId,
+                        studentName: student.studentName,
+                        totalQuizzes: 0,
+                        averageScore: 0,
+                        averageTimeEfficiency: 0,
+                        participationRate: 0,
+                        basePoints: 0,
+                        finalPoints: 0,
+                        averageTime: '0:00',
+                        rank: 999
+                    };
+                }
+
+                // Calculate average score
+                const averageScore = studentResults.reduce((sum, r) => sum + r.percentage, 0) / studentResults.length;
+
+                // Calculate time efficiency for each result
+                const timeEfficiencies = studentResults.map(result => {
+                    const quiz = classQuizzes.find(q => q._id.toString() === result.quizId.toString());
+                    const quizDurationSeconds = quiz ? (quiz.durationMinutes || 15) * 60 : 900;
+                    return calculateTimeEfficiency(result.timeTakenSeconds, quizDurationSeconds);
+                });
+
+                const averageTimeEfficiency = timeEfficiencies.length > 0
+                    ? timeEfficiencies.reduce((sum, eff) => sum + eff, 0) / timeEfficiencies.length
+                    : 0;
+
+                // Calculate participation rate
+                const participationRate = totalQuizzesAvailable > 0
+                    ? (studentResults.length / totalQuizzesAvailable) * 100
+                    : 0;
+
+                // Calculate base points and participation-weighted final points
+                const basePoints = calculateRankingPoints(averageScore, averageTimeEfficiency);
+                const finalPoints = calculateParticipationWeightedPoints(averageScore, averageTimeEfficiency, participationRate);
+
+                const averageTime = studentResults.reduce((sum, r) => sum + r.timeTakenSeconds, 0) / studentResults.length;
+
+                return {
+                    studentId: student.studentId,
+                    studentName: student.studentName,
+                    totalQuizzes: studentResults.length,
+                    averageScore: formatPercentage(averageScore),
+                    averageTimeEfficiency: formatPercentage(averageTimeEfficiency),
+                    participationRate: formatPercentage(participationRate),
+                    basePoints: basePoints,
+                    finalPoints: finalPoints,
+                    averageTime: formatTime(averageTime),
+                    rank: 0
+                };
+            })
+        );
+
+        // Sort by final points (participation-weighted)
+        const rankedStudents = studentRankings
+            .filter(student => student.totalQuizzes > 0)
+            .sort((a, b) => b.finalPoints - a.finalPoints)
+            .map((student, index) => ({
+                ...student,
+                rank: index + 1
+            }));
+
+        console.log(`Teacher API - Participation-weighted rankings generated: ${rankedStudents.length} students`);
+
+        res.json({
+            success: true,
+            data: {
+                rankings: rankedStudents,
+                totalStudents: rankedStudents.length,
+                totalQuizzesAvailable: totalQuizzesAvailable,
+                rankingSystem: {
+                    formula: 'Final Points = Base Points × (0.3 + 0.7 × Participation Rate)',
+                    baseFormula: 'Base Points = (Score × 0.7) + (Time Efficiency × 0.3)',
+                    description: 'Rankings reward both performance and participation. Students with higher participation get bonus multiplier.',
+                    participationWeight: '70% of final scoring depends on participation rate'
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Error generating teacher API rankings:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to generate rankings: ' + error.message
+        });
+    }
+});
+
+// Get class quizzes - FIXED: This was being called as /api/teacher/class/:classId/quizzes
+router.get('/class/:classId/quizzes', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Get quizzes for this class
+        const quizzes = await quizCollection.find({
+            classId: classId,
+            isActive: true
+        }).sort({ generatedDate: -1 }).lean();
+
+        // Get quiz results for each quiz to calculate statistics
+        const quizzesWithStats = await Promise.all(
+            quizzes.map(async (quiz) => {
+                const quizResults = await quizResultCollection.find({
+                    quizId: quiz._id
+                }).lean();
+
+                const totalAttempts = quizResults.length;
+                const averageScore = totalAttempts > 0
+                    ? formatPercentage(quizResults.reduce((sum, result) => sum + result.percentage, 0) / totalAttempts)
+                    : 0;
+                const highestScore = totalAttempts > 0
+                    ? formatPercentage(Math.max(...quizResults.map(result => result.percentage)))
+                    : 0;
+
+                return {
+                    _id: quiz._id,
+                    lectureId: quiz.lectureId,
+                    lectureTitle: quiz.lectureTitle,
+                    totalQuestions: quiz.totalQuestions,
+                    durationMinutes: quiz.durationMinutes,
+                    generatedDate: quiz.generatedDate,
+                    isExamMode: quiz.isExamMode || false,
+                    examStatus: quiz.examStatus,
+                    // Statistics
+                    totalAttempts: totalAttempts,
+                    averageScore: averageScore,
+                    highestScore: highestScore
+                };
+            })
+        );
+
+        console.log(`Found ${quizzesWithStats.length} quizzes for teacher class ${classDoc.name}`);
+
+        res.json({
+            success: true,
+            quizzes: quizzesWithStats,
+            totalQuizzes: quizzesWithStats.length,
+            className: classDoc.name
+        });
+
+    } catch (error) {
+        console.error('Error fetching teacher class quizzes:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch quizzes: ' + error.message
         });
     }
 });

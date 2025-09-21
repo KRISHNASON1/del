@@ -1,4 +1,4 @@
-// routes/api/classApi.js - FIXED VERSION WITH ALL MISSING ROUTES
+// routes/api/classApi.js - COMPLETE FIXED VERSION WITH ALL MISSING ROUTES
 const express = require('express');
 const router = express.Router();
 const { requireAuth, requireRole } = require('../../middleware/authMiddleware');
@@ -292,7 +292,7 @@ router.get('/:classId', requireAuth, async (req, res) => {
     }
 });
 
-// Update class information (teacher only) - FIXED: Added missing route
+// Update class information (teacher only)
 router.put('/:classId', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
@@ -357,9 +357,56 @@ router.put('/:classId', requireTeacher, async (req, res) => {
     }
 });
 
+// Archive/Delete class
+router.delete('/:classId', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        const existingClass = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!existingClass) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Soft delete - mark as inactive
+        await classCollection.findByIdAndUpdate(classId, {
+            isActive: false,
+            updatedAt: new Date()
+        });
+
+        // Also mark class students as inactive
+        await classStudentCollection.updateMany(
+            { classId: classId },
+            { isActive: false }
+        );
+
+        console.log(`✅ Class archived: ${existingClass.name}`);
+
+        res.json({
+            success: true,
+            message: 'Class archived successfully!'
+        });
+
+    } catch (error) {
+        console.error('Error archiving class:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to archive class: ' + error.message
+        });
+    }
+});
+
 // ==================== MISSING ROUTES - NOW IMPLEMENTED ====================
 
-// Get class overview for management page - FIXED: Added missing route
+// Get class overview for management page
 router.get('/:classId/overview', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
@@ -471,7 +518,7 @@ router.get('/:classId/overview', requireTeacher, async (req, res) => {
     }
 });
 
-// Get students in a class - FIXED: Added missing route
+// Get students in a class
 router.get('/:classId/students', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
@@ -547,7 +594,7 @@ router.get('/:classId/students', requireTeacher, async (req, res) => {
     }
 });
 
-// Add student to class - FIXED: Added missing route
+// Add student to class
 router.post('/:classId/students', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
@@ -657,7 +704,7 @@ router.post('/:classId/students', requireTeacher, async (req, res) => {
     }
 });
 
-// Get detailed class analytics - FIXED: Added missing route
+// Get detailed class analytics
 router.get('/:classId/analytics', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
@@ -744,8 +791,10 @@ router.get('/:classId/analytics', requireTeacher, async (req, res) => {
     }
 });
 
-// Get last quiz rankings for class - FIXED: Added missing route
-router.get('/:classId/last-quiz-rankings', requireTeacher, async (req, res) => {
+// ==================== MISSING ROUTES FIXED ====================
+
+// Get class rankings - FIXED URL
+router.get('/:classId/rankings', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
         const teacherId = req.session.userId;
@@ -764,84 +813,250 @@ router.get('/:classId/last-quiz-rankings', requireTeacher, async (req, res) => {
             });
         }
 
-        // Find the most recently taken quiz by students
-        const latestResult = await quizResultCollection.findOne({
-            classId: classId
-        }).sort({ submissionDate: -1 }).lean();
-
-        if (!latestResult) {
-            return res.json({
-                success: true,
-                data: {
-                    quizTitle: null,
-                    quizDate: null,
-                    rankings: []
-                }
-            });
-        }
-
-        // Get the quiz details
-        const quiz = await quizCollection.findById(latestResult.quizId).lean();
-
-        if (!quiz) {
-            return res.json({
-                success: true,
-                data: {
-                    quizTitle: 'Unknown Quiz',
-                    quizDate: latestResult.submissionDate.toISOString().split('T')[0],
-                    rankings: []
-                }
-            });
-        }
-
-        // Get all student results for that specific quiz
-        const quizResults = await quizResultCollection.find({
-            quizId: latestResult.quizId,
-            classId: classId
+        // Get all students enrolled in this class
+        const classStudents = await classStudentCollection.find({
+            classId: classId,
+            isActive: true
         }).lean();
 
-        // Calculate rankings using the new points formula for that quiz
-        const quizDurationSeconds = (quiz.durationMinutes || 15) * 60;
+        if (classStudents.length === 0) {
+            return res.json({
+                success: true,
+                data: {
+                    rankings: [],
+                    totalStudents: 0,
+                    rankingSystem: {
+                        formula: 'Final Points = Base Points × (0.3 + 0.7 × Participation Rate)',
+                        description: 'Rankings reward both performance and participation. Base Points = (Score × 0.7) + (Time Efficiency × 0.3)'
+                    }
+                }
+            });
+        }
 
-        const rankings = quizResults.map(result => {
-            // Calculate time efficiency for this specific quiz
-            const timeEfficiency = calculateTimeEfficiency(result.timeTakenSeconds, quizDurationSeconds);
+        // Get quiz information for participation calculation
+        const classQuizzes = await quizCollection.find({
+            classId: classId,
+            isActive: true
+        }).lean();
 
-            // Calculate points using new formula
-            const points = calculateRankingPoints(result.percentage, timeEfficiency);
+        const totalQuizzesAvailable = classQuizzes.length;
 
-            return {
-                studentId: result.studentId,
-                studentName: result.studentName,
-                score: formatPercentage(result.percentage),
-                timeTaken: formatTime(result.timeTakenSeconds),
-                timeEfficiency: formatPercentage(timeEfficiency),
-                points: points,
-                submissionDate: result.submissionDate
-            };
-        })
-            .sort((a, b) => b.points - a.points)
+        // Calculate rankings with participation-weighted formula
+        const studentRankings = await Promise.all(
+            classStudents.map(async (student) => {
+                const studentResults = await quizResultCollection.find({
+                    studentId: student.studentId,
+                    classId: classId
+                }).lean();
+
+                if (studentResults.length === 0) {
+                    return {
+                        studentId: student.studentId,
+                        studentName: student.studentName,
+                        totalQuizzes: 0,
+                        averageScore: 0,
+                        averageTimeEfficiency: 0,
+                        participationRate: 0,
+                        basePoints: 0,
+                        finalPoints: 0,
+                        averageTime: '0:00',
+                        rank: 999
+                    };
+                }
+
+                // Calculate average score
+                const averageScore = studentResults.reduce((sum, r) => sum + r.percentage, 0) / studentResults.length;
+
+                // Calculate time efficiency for each result
+                const timeEfficiencies = studentResults.map(result => {
+                    const quiz = classQuizzes.find(q => q._id.toString() === result.quizId.toString());
+                    const quizDurationSeconds = quiz ? (quiz.durationMinutes || 15) * 60 : 900;
+                    return calculateTimeEfficiency(result.timeTakenSeconds, quizDurationSeconds);
+                });
+
+                const averageTimeEfficiency = timeEfficiencies.length > 0
+                    ? timeEfficiencies.reduce((sum, eff) => sum + eff, 0) / timeEfficiencies.length
+                    : 0;
+
+                // Calculate participation rate
+                const participationRate = totalQuizzesAvailable > 0
+                    ? (studentResults.length / totalQuizzesAvailable) * 100
+                    : 0;
+
+                // Calculate base points and participation-weighted final points
+                const basePoints = calculateRankingPoints(averageScore, averageTimeEfficiency);
+                const finalPoints = calculateParticipationWeightedPoints(averageScore, averageTimeEfficiency, participationRate);
+
+                const averageTime = studentResults.reduce((sum, r) => sum + r.timeTakenSeconds, 0) / studentResults.length;
+
+                return {
+                    studentId: student.studentId,
+                    studentName: student.studentName,
+                    totalQuizzes: studentResults.length,
+                    averageScore: formatPercentage(averageScore),
+                    averageTimeEfficiency: formatPercentage(averageTimeEfficiency),
+                    participationRate: formatPercentage(participationRate),
+                    basePoints: basePoints,
+                    finalPoints: finalPoints,
+                    averageTime: formatTime(averageTime),
+                    rank: 0
+                };
+            })
+        );
+
+        // Sort by final points (participation-weighted)
+        const rankedStudents = studentRankings
+            .filter(student => student.totalQuizzes > 0)
+            .sort((a, b) => b.finalPoints - a.finalPoints)
             .map((student, index) => ({
                 ...student,
                 rank: index + 1
             }));
 
-        console.log(`Last quiz rankings loaded: ${quiz.lectureTitle} with ${rankings.length} participants`);
+        console.log(`Participation-weighted rankings generated: ${rankedStudents.length} students`);
 
         res.json({
             success: true,
             data: {
-                quizTitle: quiz.lectureTitle,
-                quizDate: latestResult.submissionDate.toISOString().split('T')[0],
-                rankings: rankings
+                rankings: rankedStudents,
+                totalStudents: rankedStudents.length,
+                totalQuizzesAvailable: totalQuizzesAvailable,
+                rankingSystem: {
+                    formula: 'Final Points = Base Points × (0.3 + 0.7 × Participation Rate)',
+                    baseFormula: 'Base Points = (Score × 0.7) + (Time Efficiency × 0.3)',
+                    description: 'Rankings reward both performance and participation. Students with higher participation get bonus multiplier.',
+                    participationWeight: '70% of final scoring depends on participation rate'
+                }
             }
         });
 
     } catch (error) {
-        console.error('Error loading last quiz rankings:', error);
+        console.error('Error generating participation-weighted rankings:', error);
         res.status(500).json({
             success: false,
-            message: 'Failed to load last quiz rankings: ' + error.message
+            message: 'Failed to generate rankings: ' + error.message
+        });
+    }
+});
+
+// Get join requests for a class - NEW ROUTE
+router.get('/:classId/join-requests', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Get join requests for this class
+        const joinRequests = await classJoinRequestCollection.find({
+            classId: classId
+        }).sort({ requestedAt: -1 }).lean();
+
+        const formattedRequests = joinRequests.map(request => ({
+            _id: request._id,
+            studentName: request.studentName,
+            studentEnrollment: request.studentEnrollment,
+            status: request.status,
+            requestedAt: request.requestedAt,
+            processedAt: request.processedAt,
+            rejectionReason: request.rejectionReason
+        }));
+
+        console.log(`Found ${formattedRequests.length} join requests for class ${classDoc.name}`);
+
+        res.json({
+            success: true,
+            joinRequests: formattedRequests,
+            totalRequests: formattedRequests.length,
+            pendingRequests: formattedRequests.filter(r => r.status === 'pending').length
+        });
+
+    } catch (error) {
+        console.error('Error fetching join requests:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch join requests: ' + error.message
+        });
+    }
+});
+
+// Get class quizzes - NEW ROUTE
+router.get('/:classId/quizzes', requireAuth, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const userId = req.session.userId;
+        const userType = req.session.userType;
+
+        // Verify access to class
+        if (userType === 'teacher') {
+            const classDoc = await classCollection.findOne({
+                _id: classId,
+                teacherId: userId,
+                isActive: true
+            });
+
+            if (!classDoc) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Class not found or access denied.'
+                });
+            }
+        } else if (userType === 'student') {
+            const enrollment = await classStudentCollection.findOne({
+                studentId: userId,
+                classId: classId,
+                isActive: true
+            });
+
+            if (!enrollment) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Access denied. You are not enrolled in this class.'
+                });
+            }
+        }
+
+        // Get quizzes for this class
+        const quizzes = await quizCollection.find({
+            classId: classId,
+            isActive: true
+        }).sort({ generatedDate: -1 }).lean();
+
+        const formattedQuizzes = quizzes.map(quiz => ({
+            _id: quiz._id,
+            lectureTitle: quiz.lectureTitle,
+            totalQuestions: quiz.totalQuestions,
+            durationMinutes: quiz.durationMinutes,
+            generatedDate: quiz.generatedDate,
+            isExamMode: quiz.isExamMode || false,
+            examStatus: quiz.examStatus
+        }));
+
+        console.log(`Found ${formattedQuizzes.length} quizzes for class`);
+
+        res.json({
+            success: true,
+            quizzes: formattedQuizzes,
+            totalQuizzes: formattedQuizzes.length
+        });
+
+    } catch (error) {
+        console.error('Error fetching class quizzes:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch quizzes: ' + error.message
         });
     }
 });
