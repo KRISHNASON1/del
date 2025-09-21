@@ -1,4 +1,4 @@
-// routes/api/classApi.js - FIXED VERSION
+// routes/api/classApi.js - FIXED VERSION WITH ALL MISSING ROUTES
 const express = require('express');
 const router = express.Router();
 const { requireAuth, requireRole } = require('../../middleware/authMiddleware');
@@ -288,6 +288,560 @@ router.get('/:classId', requireAuth, async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to fetch class: ' + error.message
+        });
+    }
+});
+
+// Update class information (teacher only) - FIXED: Added missing route
+router.put('/:classId', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+        const { name, subject, description } = req.body;
+
+        if (!name || !subject) {
+            return res.status(400).json({
+                success: false,
+                message: 'Class name and subject are required.'
+            });
+        }
+
+        const existingClass = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!existingClass) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        const updatedClass = await classCollection.findByIdAndUpdate(
+            classId,
+            {
+                name: name.trim(),
+                subject: subject.trim(),
+                description: description?.trim() || '',
+                updatedAt: new Date()
+            },
+            { new: true }
+        ).lean();
+
+        console.log(`Class updated: ${updatedClass.name}`);
+
+        res.json({
+            success: true,
+            message: 'Class updated successfully!',
+            class: {
+                id: updatedClass._id,
+                name: updatedClass.name,
+                subject: updatedClass.subject,
+                description: updatedClass.description,
+                studentCount: updatedClass.studentCount || 0,
+                lectureCount: updatedClass.lectureCount || 0,
+                quizCount: updatedClass.quizCount || 0,
+                averageScore: updatedClass.averageScore || 0,
+                updatedAt: updatedClass.updatedAt
+            }
+        });
+
+    } catch (error) {
+        console.error('Error updating class:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to update class: ' + error.message
+        });
+    }
+});
+
+// ==================== MISSING ROUTES - NOW IMPLEMENTED ====================
+
+// Get class overview for management page - FIXED: Added missing route
+router.get('/:classId/overview', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Get class students and quiz results
+        const classStudents = await classStudentCollection.find({
+            classId: classId,
+            isActive: true
+        }).lean();
+
+        const allResults = await quizResultCollection.find({
+            classId: classId
+        }).lean();
+
+        // Calculate performance trend data for chart
+        const quizzes = await quizCollection.find({
+            classId: classId,
+            isActive: true
+        }).sort({ generatedDate: 1 }).lean();
+
+        const performanceTrend = quizzes.map(quiz => {
+            const quizResults = allResults.filter(result =>
+                result.quizId.toString() === quiz._id.toString()
+            );
+
+            const averageScore = quizResults.length > 0
+                ? quizResults.reduce((sum, result) => sum + result.percentage, 0) / quizResults.length
+                : 0;
+
+            return {
+                quizTitle: quiz.lectureTitle,
+                score: formatPercentage(averageScore),
+                attempts: quizResults.length,
+                date: quiz.generatedDate
+            };
+        });
+
+        // Calculate student performance map
+        const studentPerformance = {};
+        allResults.forEach(result => {
+            const studentId = result.studentId.toString();
+            if (!studentPerformance[studentId]) {
+                studentPerformance[studentId] = {
+                    studentName: result.studentName,
+                    scores: [],
+                    totalQuizzes: 0
+                };
+            }
+            studentPerformance[studentId].scores.push(result.percentage);
+            studentPerformance[studentId].totalQuizzes++;
+        });
+
+        // Calculate top performers with proper formatting
+        const topPerformers = Object.values(studentPerformance)
+            .map(student => ({
+                studentName: student.studentName,
+                averageScore: formatPercentage(student.scores.reduce((a, b) => a + b, 0) / student.scores.length),
+                totalQuizzes: student.totalQuizzes
+            }))
+            .sort((a, b) => b.averageScore - a.averageScore)
+            .slice(0, 5);
+
+        // Get recent activity
+        const recentActivity = allResults
+            .sort((a, b) => new Date(b.submissionDate) - new Date(a.submissionDate))
+            .slice(0, 10)
+            .map(result => ({
+                studentName: result.studentName,
+                score: formatPercentage(result.percentage),
+                submissionDate: result.submissionDate.toLocaleDateString(),
+                timeTaken: formatTime(result.timeTakenSeconds)
+            }));
+
+        console.log('Performance trend data:', performanceTrend.length, 'data points');
+
+        res.json({
+            success: true,
+            classData: {
+                ...classDoc,
+                studentCount: classStudents.length,
+                averageScore: formatPercentage(classDoc.averageScore || 0)
+            },
+            topPerformers: topPerformers,
+            recentActivity: recentActivity,
+            performanceTrend: performanceTrend
+        });
+
+    } catch (error) {
+        console.error('Error fetching class overview:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch class overview: ' + error.message
+        });
+    }
+});
+
+// Get students in a class - FIXED: Added missing route
+router.get('/:classId/students', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Get students enrolled in this class
+        const enrollments = await classStudentCollection.find({
+            classId: classId,
+            isActive: true
+        }).lean();
+
+        console.log(`Found ${enrollments.length} active enrollments`);
+
+        // Get quiz results for performance stats
+        const studentsWithStats = await Promise.all(
+            enrollments.map(async (enrollment) => {
+                const studentResults = await quizResultCollection.find({
+                    studentId: enrollment.studentId,
+                    classId: classId
+                }).lean();
+
+                const totalQuizzes = studentResults.length;
+                const averageScore = totalQuizzes > 0
+                    ? (studentResults.reduce((sum, result) => sum + result.percentage, 0) / totalQuizzes).toFixed(1)
+                    : 0;
+
+                const lastActivity = totalQuizzes > 0
+                    ? studentResults[studentResults.length - 1].submissionDate
+                    : enrollment.enrolledAt;
+
+                return {
+                    studentId: enrollment.studentId,
+                    studentName: enrollment.studentName,
+                    studentEnrollment: enrollment.studentEnrollment,
+                    enrolledAt: enrollment.enrolledAt,
+                    totalQuizzes: totalQuizzes,
+                    averageScore: parseFloat(averageScore),
+                    lastActivity: lastActivity,
+                    participationRate: totalQuizzes > 0 ? 100 : 0
+                };
+            })
+        );
+
+        console.log(`Students loaded with stats: ${studentsWithStats.length}`);
+
+        res.json({
+            success: true,
+            students: studentsWithStats,
+            totalStudents: studentsWithStats.length,
+            className: classDoc.name
+        });
+
+    } catch (error) {
+        console.error('Error fetching students:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch students: ' + error.message
+        });
+    }
+});
+
+// Add student to class - FIXED: Added missing route
+router.post('/:classId/students', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+        const { enrollmentNumber } = req.body;
+
+        if (!enrollmentNumber) {
+            return res.status(400).json({
+                success: false,
+                message: 'Student enrollment number is required.'
+            });
+        }
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Find student by enrollment number
+        const student = await studentCollection.findOne({
+            enrollment: enrollmentNumber.trim()
+        });
+
+        if (!student) {
+            return res.status(404).json({
+                success: false,
+                message: 'Student not found with this enrollment number.'
+            });
+        }
+
+        // Check for ANY existing enrollment (active or inactive)
+        const existingEnrollment = await classStudentCollection.findOne({
+            classId: classId,
+            studentId: student._id
+        });
+
+        if (existingEnrollment) {
+            if (existingEnrollment.isActive) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Student is already enrolled in this class.'
+                });
+            } else {
+                // Reactivate enrollment instead of creating new one
+                await classStudentCollection.findByIdAndUpdate(existingEnrollment._id, {
+                    isActive: true,
+                    enrolledAt: new Date(),
+                    studentName: student.name,
+                    studentEnrollment: student.enrollment
+                });
+                console.log('Student enrollment reactivated');
+            }
+        } else {
+            // Create new enrollment
+            const newEnrollment = await classStudentCollection.create({
+                classId: classId,
+                studentId: student._id,
+                studentName: student.name,
+                studentEnrollment: student.enrollment
+            });
+            console.log('New student enrollment created:', newEnrollment._id);
+        }
+
+        // Update class student count
+        const totalActiveStudents = await classStudentCollection.countDocuments({
+            classId: classId,
+            isActive: true
+        });
+
+        await classCollection.findByIdAndUpdate(classId, {
+            studentCount: totalActiveStudents,
+            updatedAt: new Date()
+        });
+
+        console.log(`Student ${student.name} (${student.enrollment}) added to class ${classDoc.name}`);
+
+        res.json({
+            success: true,
+            message: `Student ${student.name} added to class successfully!`,
+            student: {
+                studentId: student._id,
+                studentName: student.name,
+                studentEnrollment: student.enrollment,
+                enrolledAt: new Date(),
+                totalQuizzes: 0,
+                averageScore: 0,
+                lastActivity: new Date(),
+                participationRate: 0
+            }
+        });
+
+    } catch (error) {
+        console.error('Error adding student to class:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to add student: ' + error.message
+        });
+    }
+});
+
+// Get detailed class analytics - FIXED: Added missing route
+router.get('/:classId/analytics', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Get all quiz results for this class
+        const allResults = await quizResultCollection.find({
+            classId: classId
+        }).lean();
+
+        // Get class quizzes
+        const classQuizzes = await quizCollection.find({
+            classId: classId,
+            isActive: true
+        }).lean();
+
+        // Calculate detailed analytics with proper formatting
+        const analytics = {
+            totalParticipants: new Set(allResults.map(r => r.studentId.toString())).size,
+            totalQuizAttempts: allResults.length,
+            classAverage: allResults.length > 0
+                ? formatPercentage(allResults.reduce((sum, r) => sum + r.percentage, 0) / allResults.length)
+                : 0,
+            highestScore: allResults.length > 0
+                ? formatPercentage(Math.max(...allResults.map(r => r.percentage)))
+                : 0,
+            lowestScore: allResults.length > 0
+                ? formatPercentage(Math.min(...allResults.map(r => r.percentage)))
+                : 0,
+
+            // Performance distribution
+            performanceDistribution: {
+                excellent: allResults.filter(r => r.percentage >= 90).length,
+                good: allResults.filter(r => r.percentage >= 70 && r.percentage < 90).length,
+                average: allResults.filter(r => r.percentage >= 50 && r.percentage < 70).length,
+                needsImprovement: allResults.filter(r => r.percentage < 50).length
+            },
+
+            // Quiz performance breakdown with proper formatting
+            quizPerformance: classQuizzes.map(quiz => {
+                const quizResults = allResults.filter(r => r.quizId.toString() === quiz._id.toString());
+                return {
+                    quizId: quiz._id,
+                    quizTitle: quiz.lectureTitle,
+                    totalAttempts: quizResults.length,
+                    averageScore: quizResults.length > 0
+                        ? formatPercentage(quizResults.reduce((sum, r) => sum + r.percentage, 0) / quizResults.length)
+                        : 0,
+                    highestScore: quizResults.length > 0
+                        ? formatPercentage(Math.max(...quizResults.map(r => r.percentage)))
+                        : 0,
+                    lowestScore: quizResults.length > 0
+                        ? formatPercentage(Math.min(...quizResults.map(r => r.percentage)))
+                        : 0
+                };
+            })
+        };
+
+        res.json({
+            success: true,
+            analytics: analytics
+        });
+
+    } catch (error) {
+        console.error('Error fetching class analytics:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch class analytics: ' + error.message
+        });
+    }
+});
+
+// Get last quiz rankings for class - FIXED: Added missing route
+router.get('/:classId/last-quiz-rankings', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Find the most recently taken quiz by students
+        const latestResult = await quizResultCollection.findOne({
+            classId: classId
+        }).sort({ submissionDate: -1 }).lean();
+
+        if (!latestResult) {
+            return res.json({
+                success: true,
+                data: {
+                    quizTitle: null,
+                    quizDate: null,
+                    rankings: []
+                }
+            });
+        }
+
+        // Get the quiz details
+        const quiz = await quizCollection.findById(latestResult.quizId).lean();
+
+        if (!quiz) {
+            return res.json({
+                success: true,
+                data: {
+                    quizTitle: 'Unknown Quiz',
+                    quizDate: latestResult.submissionDate.toISOString().split('T')[0],
+                    rankings: []
+                }
+            });
+        }
+
+        // Get all student results for that specific quiz
+        const quizResults = await quizResultCollection.find({
+            quizId: latestResult.quizId,
+            classId: classId
+        }).lean();
+
+        // Calculate rankings using the new points formula for that quiz
+        const quizDurationSeconds = (quiz.durationMinutes || 15) * 60;
+
+        const rankings = quizResults.map(result => {
+            // Calculate time efficiency for this specific quiz
+            const timeEfficiency = calculateTimeEfficiency(result.timeTakenSeconds, quizDurationSeconds);
+
+            // Calculate points using new formula
+            const points = calculateRankingPoints(result.percentage, timeEfficiency);
+
+            return {
+                studentId: result.studentId,
+                studentName: result.studentName,
+                score: formatPercentage(result.percentage),
+                timeTaken: formatTime(result.timeTakenSeconds),
+                timeEfficiency: formatPercentage(timeEfficiency),
+                points: points,
+                submissionDate: result.submissionDate
+            };
+        })
+            .sort((a, b) => b.points - a.points)
+            .map((student, index) => ({
+                ...student,
+                rank: index + 1
+            }));
+
+        console.log(`Last quiz rankings loaded: ${quiz.lectureTitle} with ${rankings.length} participants`);
+
+        res.json({
+            success: true,
+            data: {
+                quizTitle: quiz.lectureTitle,
+                quizDate: latestResult.submissionDate.toISOString().split('T')[0],
+                rankings: rankings
+            }
+        });
+
+    } catch (error) {
+        console.error('Error loading last quiz rankings:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to load last quiz rankings: ' + error.message
         });
     }
 });
@@ -689,175 +1243,6 @@ router.post('/join-request', requireStudent, async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to submit join request: ' + error.message
-        });
-    }
-});
-
-// ==================== ADDITIONAL CLASS MANAGEMENT ====================
-
-// Get pending requests for class (teacher)
-router.get('/:classId/join-requests', requireTeacher, async (req, res) => {
-    try {
-        const classId = req.params.classId;
-        const teacherId = req.session.userId;
-
-        // Verify class ownership
-        const classDoc = await classCollection.findOne({
-            _id: classId,
-            teacherId: teacherId,
-            isActive: true
-        });
-
-        if (!classDoc) {
-            return res.status(404).json({
-                success: false,
-                message: 'Class not found or access denied.'
-            });
-        }
-
-        // Get pending requests
-        const pendingRequests = await classJoinRequestCollection.find({
-            classId: classId,
-            status: 'pending'
-        }).sort({ requestedAt: -1 });
-
-        const formattedRequests = pendingRequests.map(request => ({
-            requestId: request._id,
-            studentName: request.studentName,
-            studentEnrollment: request.studentEnrollment,
-            joinCode: request.joinCode,
-            requestedAt: request.requestedAt,
-            timeAgo: getTimeAgo(request.requestedAt)
-        }));
-
-        res.json({
-            success: true,
-            requests: formattedRequests,
-            totalPending: formattedRequests.length,
-            className: classDoc.name
-        });
-
-    } catch (error) {
-        console.error('Error fetching join requests:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to fetch join requests: ' + error.message
-        });
-    }
-});
-
-// Approve/reject join request (teacher)
-router.post('/:classId/join-requests/:requestId/:action', requireTeacher, async (req, res) => {
-    try {
-        const { classId, requestId, action } = req.params;
-        const teacherId = req.session.userId;
-
-        if (!['approve', 'reject'].includes(action)) {
-            return res.status(400).json({
-                success: false,
-                message: 'Invalid action. Must be "approve" or "reject".'
-            });
-        }
-
-        // Verify class ownership
-        const classDoc = await classCollection.findOne({
-            _id: classId,
-            teacherId: teacherId,
-            isActive: true
-        });
-
-        if (!classDoc) {
-            return res.status(404).json({
-                success: false,
-                message: 'Class not found or access denied.'
-            });
-        }
-
-        // Find the join request
-        const joinRequest = await classJoinRequestCollection.findOne({
-            _id: requestId,
-            classId: classId,
-            status: 'pending'
-        });
-
-        if (!joinRequest) {
-            return res.status(404).json({
-                success: false,
-                message: 'Join request not found or already processed.'
-            });
-        }
-
-        if (action === 'approve') {
-            // Handle enrollment logic (reactivate or create new)
-            const existingEnrollment = await classStudentCollection.findOne({
-                classId: classId,
-                studentId: joinRequest.studentId
-            });
-
-            if (existingEnrollment) {
-                if (existingEnrollment.isActive) {
-                    await joinRequest.approve(teacherId);
-                    return res.status(400).json({
-                        success: false,
-                        message: 'Student is already enrolled in this class.'
-                    });
-                } else {
-                    await classStudentCollection.findByIdAndUpdate(existingEnrollment._id, {
-                        isActive: true,
-                        enrolledAt: new Date(),
-                        studentName: joinRequest.studentName,
-                        studentEnrollment: joinRequest.studentEnrollment
-                    });
-                }
-            } else {
-                await classStudentCollection.create({
-                    classId: classId,
-                    studentId: joinRequest.studentId,
-                    studentName: joinRequest.studentName,
-                    studentEnrollment: joinRequest.studentEnrollment,
-                    enrolledAt: new Date(),
-                    isActive: true
-                });
-            }
-
-            await joinRequest.approve(teacherId);
-
-            // Update class student count
-            const totalActiveStudents = await classStudentCollection.countDocuments({
-                classId: classId,
-                isActive: true
-            });
-
-            await classCollection.findByIdAndUpdate(classId, {
-                studentCount: totalActiveStudents,
-                updatedAt: new Date()
-            });
-
-            res.json({
-                success: true,
-                message: `${joinRequest.studentName} has been added to the class successfully!`,
-                action: 'approved',
-                studentName: joinRequest.studentName,
-                studentEnrollment: joinRequest.studentEnrollment
-            });
-
-        } else if (action === 'reject') {
-            await joinRequest.reject(teacherId, 'Request rejected by teacher');
-
-            res.json({
-                success: true,
-                message: `Join request from ${joinRequest.studentName} has been rejected.`,
-                action: 'rejected',
-                studentName: joinRequest.studentName,
-                rejectionReason: 'Request rejected by teacher'
-            });
-        }
-
-    } catch (error) {
-        console.error('Error processing join request:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to process join request: ' + error.message
         });
     }
 });
