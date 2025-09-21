@@ -1,7 +1,7 @@
-// routes/authRoutes.js - Fixed with all necessary imports
+// routes/authRoutes.js - FIXED VERSION
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
+const crypto = require('crypto');
 const { isAuthenticated } = require('../middleware/authMiddleware');
 const { validateRegistration, validateLogin } = require('../middleware/validationMiddleware');
 
@@ -11,13 +11,26 @@ const {
     teacherCollection
 } = require('../mongodb');
 
-// Import email services
+// Import services
 const { sendEmail } = require('../services/emailService');
 const { renderEmailTemplate } = require('../utils/templateRenderer');
 
 // Constants
 const VERIFICATION_TOKEN_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
 const PASSWORD_RESET_TOKEN_EXPIRY = 60 * 60 * 1000; // 1 hour
+
+// Helper function to parse name into firstName and lastName
+const parseName = (fullName) => {
+    if (!fullName || typeof fullName !== 'string') {
+        return { firstName: '', lastName: '' };
+    }
+    
+    const nameParts = fullName.trim().split(' ').filter(part => part.trim() !== '');
+    const firstName = nameParts[0] || '';
+    const lastName = nameParts.slice(1).join(' ') || '';
+    
+    return { firstName, lastName };
+};
 
 // Redirect root to login
 router.get('/', (req, res) => {
@@ -34,18 +47,20 @@ router.get('/signup', (req, res) => {
     res.render('signup');
 });
 
-// Signup form submission
+// Signup form submission - FIXED
 router.post('/signup', validateRegistration, async (req, res) => {
     try {
         const { userType, name, email, enrollment, password } = req.body;
         const errors = {};
 
-        console.log('Signup attempt:', {
-            userType,
-            name,
-            email: email || 'N/A',
-            enrollment: enrollment || 'N/A'
-        });
+        // Parse name into firstName and lastName
+        const { firstName, lastName } = parseName(name);
+        
+        // Ensure firstName is not empty
+        if (!firstName || firstName.trim() === '') {
+            errors.name = "Please enter a valid name.";
+            return res.render("signup", { errors: errors, userType, name, email, enrollment });
+        }
 
         if (userType === 'teacher') {
             // Check if teacher email already exists
@@ -58,23 +73,23 @@ router.post('/signup', validateRegistration, async (req, res) => {
                 return res.render("signup", { errors: errors, userType, name, email, enrollment });
             }
 
-            // Create teacher with firstName/lastName from name
-            const nameParts = name.trim().split(' ');
-            const firstName = nameParts[0] || '';
-            const lastName = nameParts.slice(1).join(' ') || '';
-
+            // Create teacher with proper name structure
             const teacherData = { 
-                name: name.trim(), 
+                name: name.trim(),
                 firstName: firstName,
                 lastName: lastName,
-                email: email.toLowerCase().trim(), 
-                password: password 
+                email: email.trim().toLowerCase(),
+                password: password
             };
-
-            console.log('Creating teacher with data:', teacherData);
             
-            await teacherCollection.insertMany([teacherData]);
-            const newTeacher = await teacherCollection.findOne({ email: email.toLowerCase().trim() });
+            console.log('Creating teacher with data:', { 
+                name: teacherData.name, 
+                firstName: teacherData.firstName, 
+                lastName: teacherData.lastName,
+                email: teacherData.email 
+            });
+
+            const newTeacher = await teacherCollection.create(teacherData);
             
             req.session.userId = newTeacher._id;
             req.session.userName = newTeacher.name;
@@ -99,27 +114,23 @@ router.post('/signup', validateRegistration, async (req, res) => {
                 return res.render("signup", { errors: errors, userType, name, email, enrollment });
             }
 
-            // Create student with firstName/lastName from name
-            const nameParts = name.trim().split(' ');
-            const firstName = nameParts[0] || '';
-            const lastName = nameParts.slice(1).join(' ') || '';
-
+            // Create student with proper name structure
             const studentData = { 
-                name: name.trim(), 
+                name: name.trim(),
                 firstName: firstName,
                 lastName: lastName,
-                enrollment: upperCaseEnrollment, 
-                password: password 
+                enrollment: upperCaseEnrollment,
+                password: password
             };
-
-            if (email && email.trim()) {
-                studentData.email = email.toLowerCase().trim();
-            }
-
-            console.log('Creating student with data:', studentData);
             
-            await studentCollection.insertMany([studentData]);
-            const newStudent = await studentCollection.findOne({ enrollment: upperCaseEnrollment });
+            console.log('Creating student with data:', { 
+                name: studentData.name, 
+                firstName: studentData.firstName, 
+                lastName: studentData.lastName,
+                enrollment: studentData.enrollment 
+            });
+
+            const newStudent = await studentCollection.create(studentData);
             
             req.session.userId = newStudent._id;
             req.session.userName = newStudent.name;
@@ -139,7 +150,7 @@ router.post('/signup', validateRegistration, async (req, res) => {
     }
 });
 
-// Login form submission
+// Login form submission - IMPROVED
 router.post('/login', validateLogin, async (req, res) => {
     try {
         const { password, userType, email, enrollment } = req.body;
@@ -147,19 +158,13 @@ router.post('/login', validateLogin, async (req, res) => {
         const errors = {};
         const oldInput = { userType, email, enrollment };
 
-        console.log('Login attempt:', {
-            userType,
-            email: email || 'N/A',
-            enrollment: enrollment || 'N/A'
-        });
-
         if (userType === 'teacher') {
-            user = await teacherCollection.findOne({ email: email.toLowerCase().trim() });
+            user = await teacherCollection.findOne({ email: email.trim().toLowerCase() });
             if (!user) {
                 errors.email = "No user found with this email.";
             }
         } else { // Student
-            const upperCaseEnrollment = enrollment ? enrollment.toUpperCase() : null;
+            const upperCaseEnrollment = enrollment ? enrollment.toUpperCase().trim() : null;
             user = await studentCollection.findOne({ enrollment: upperCaseEnrollment });
             if (!user) {
                 errors.enrollment = "No user found with this enrollment number.";
@@ -223,9 +228,9 @@ router.post('/forgot-password', async (req, res) => {
         }
 
         // Find user (student or teacher) by email
-        let user = await studentCollection.findOne({ email: email.toLowerCase().trim() });
+        let user = await studentCollection.findOne({ email: email.trim().toLowerCase() });
         if (!user) {
-            user = await teacherCollection.findOne({ email: email.toLowerCase().trim() });
+            user = await teacherCollection.findOne({ email: email.trim().toLowerCase() });
         }
 
         // Always send generic success message to prevent email enumeration
