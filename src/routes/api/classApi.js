@@ -791,9 +791,115 @@ router.get('/:classId/analytics', requireTeacher, async (req, res) => {
     }
 });
 
-// ==================== MISSING ROUTES FIXED ====================
+// ==================== MISSING ROUTE - LAST QUIZ RANKINGS ====================
 
-// Get class rankings - FIXED URL
+// Get last quiz rankings for class - THIS WAS MISSING!
+router.get('/:classId/last-quiz-rankings', requireTeacher, async (req, res) => {
+    try {
+        const classId = req.params.classId;
+        const teacherId = req.session.userId;
+
+        console.log('Loading last quiz rankings for class:', classId);
+
+        // Verify class ownership
+        const classDoc = await classCollection.findOne({
+            _id: classId,
+            teacherId: teacherId,
+            isActive: true
+        });
+
+        if (!classDoc) {
+            return res.status(404).json({
+                success: false,
+                message: 'Class not found or access denied.'
+            });
+        }
+
+        // Find the most recently taken quiz by students
+        const latestResult = await quizResultCollection.findOne({
+            classId: classId
+        }).sort({ submissionDate: -1 }).lean();
+
+        if (!latestResult) {
+            return res.json({
+                success: true,
+                data: {
+                    quizTitle: null,
+                    quizDate: null,
+                    rankings: []
+                }
+            });
+        }
+
+        // Get the quiz details
+        const quiz = await quizCollection.findById(latestResult.quizId).lean();
+
+        if (!quiz) {
+            return res.json({
+                success: true,
+                data: {
+                    quizTitle: 'Unknown Quiz',
+                    quizDate: latestResult.submissionDate.toISOString().split('T')[0],
+                    rankings: []
+                }
+            });
+        }
+
+        // Get all student results for that specific quiz
+        const quizResults = await quizResultCollection.find({
+            quizId: latestResult.quizId,
+            classId: classId
+        }).lean();
+
+        // Calculate rankings using the new points formula for that quiz
+        const quizDurationSeconds = (quiz.durationMinutes || 15) * 60;
+
+        const rankings = quizResults.map(result => {
+            // Calculate time efficiency for this specific quiz
+            const timeEfficiency = calculateTimeEfficiency(result.timeTakenSeconds, quizDurationSeconds);
+
+            // Calculate points using new formula
+            const points = calculateRankingPoints(result.percentage, timeEfficiency);
+
+            return {
+                studentId: result.studentId,
+                studentName: result.studentName,
+                score: formatPercentage(result.percentage),
+                timeTaken: formatTime(result.timeTakenSeconds),
+                timeEfficiency: formatPercentage(timeEfficiency),
+                points: points,
+                submissionDate: result.submissionDate
+            };
+        })
+            .sort((a, b) => b.points - a.points)
+            .map((student, index) => ({
+                ...student,
+                rank: index + 1
+            }));
+
+        console.log(`✅ Last quiz rankings loaded: ${quiz.lectureTitle} with ${rankings.length} participants`);
+
+        res.json({
+            success: true,
+            data: {
+                quizTitle: quiz.lectureTitle,
+                quizDate: latestResult.submissionDate.toISOString().split('T')[0],
+                rankings: rankings
+            }
+        });
+
+    } catch (error) {
+        console.error('Error loading last quiz rankings:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to load last quiz rankings: ' + error.message
+        });
+    }
+});
+
+// ==================== CLASS RANKINGS ROUTE ====================
+
+// Get class rankings - FIXED: This was being called as /api/classes/:classId/rankings
 router.get('/:classId/rankings', requireTeacher, async (req, res) => {
     try {
         const classId = req.params.classId;
